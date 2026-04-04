@@ -11,7 +11,8 @@ app.use(express.urlencoded({ extended: true }));
 
 const reportRoutes = require("./routes/report");
 app.use("/review", reportRoutes);
-
+const webhookRoutes = require("./routes/webhook");
+app.use("/webhook", webhookRoutes);
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
