@@ -1,4 +1,5 @@
 const { createAppAuth } = require("@octokit/auth-app");
+const { Octokit } = require("@octokit/rest");
 const fs = require("fs").promises;
 const path = require("path");
 
@@ -14,6 +15,36 @@ async function getPrivateKey() {
     privateKey = await fs.readFile(PRIVATE_KEY_PATH, "utf8");
   }
   return privateKey;
+}
+
+async function getRepoInfo(owner, repo, installationId = null) {
+  let octokit;
+
+  if (installationId) {
+    const auth = createAppAuth({
+      appId: process.env.GITHUB_APP_ID,
+      privateKey: await getPrivateKey(),
+    });
+
+    const { token } = await auth({
+      type: "installation",
+      installationId,
+    });
+
+    octokit = new Octokit({ auth: token });
+  } else {
+    octokit = new Octokit();
+  }
+
+  const { data } = await octokit.repos.get({
+    owner,
+    repo,
+  });
+
+  return {
+    defaultBranch: data.default_branch,
+    isPrivate: data.private,
+  };
 }
 
 async function getInstallationAccessToken(installationId) {
@@ -34,4 +65,4 @@ async function getInstallationAccessToken(installationId) {
   return token;
 }
 
-module.exports = { getInstallationAccessToken };
+module.exports = { getInstallationAccessToken, getRepoInfo };

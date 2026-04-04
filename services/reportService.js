@@ -3,7 +3,7 @@ const simpleGit = require("simple-git");
 const fs = require("fs").promises;
 const path = require("path");
 const os = require("os");
-const { getInstallationAccessToken } = require("./githubApp");
+const { getInstallationAccessToken, getRepoInfo } = require("./githubApp");
 
 async function generateRepoReport(params) {
   const {
@@ -25,7 +25,16 @@ async function generateRepoReport(params) {
 
     const cloneOwner = headOwner || owner;
     const cloneRepo = headRepo || repositoryName;
-    const cloneRef = headRef || "main";
+
+    let cloneRef = headRef;
+
+    if (!cloneRef) {
+      const repoInfo = await getRepoInfo(cloneOwner, cloneRepo, installationId);
+      cloneRef = repoInfo.defaultBranch;
+      console.log(
+        `Detected default branch: ${cloneRef} for ${cloneOwner}/${cloneRepo}`,
+      );
+    }
 
     let repoUrl = `https://github.com/${cloneOwner}/${cloneRepo}.git`;
 

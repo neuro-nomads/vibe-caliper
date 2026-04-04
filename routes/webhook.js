@@ -7,6 +7,7 @@ const { getInstallationAccessToken } = require("../services/githubApp");
 router.post("/github-webhook", async (req, res) => {
   const event = req.headers["x-github-event"];
   const payload = req.body;
+  console.log(`Received GitHub event: ${event}`);
 
   if (
     event === "pull_request" &&
