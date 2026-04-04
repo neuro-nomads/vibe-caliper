@@ -3,63 +3,94 @@ const simpleGit = require("simple-git");
 const fs = require("fs").promises;
 const path = require("path");
 const os = require("os");
+const { getInstallationAccessToken } = require("./githubApp");
 
-async function generateRepoReport(owner, repositoryName) {
+async function generateRepoReport(params) {
+  const {
+    owner,
+    repositoryName,
+    installationId = null,
+    headOwner,
+    headRepo,
+    headRef,
+  } = params;
+
   const repoFullName = `${owner}/${repositoryName}`;
   const tempDir = path.join(os.tmpdir(), `repo-review-${Date.now()}`);
 
   try {
     console.log(`Starting report for ${repoFullName}`);
 
-    const repoUrl = `https://github.com/${repoFullName}.git`;
     await fs.mkdir(tempDir, { recursive: true });
-    await simpleGit().clone(repoUrl, tempDir);
+
+    const cloneOwner = headOwner || owner;
+    const cloneRepo = headRepo || repositoryName;
+    const cloneRef = headRef || "main";
+
+    let repoUrl = `https://github.com/${cloneOwner}/${cloneRepo}.git`;
+
+    if (installationId) {
+      const token = await getInstallationAccessToken(installationId);
+      repoUrl = `https://x-access-token:${token}@github.com/${cloneOwner}/${cloneRepo}.git`;
+      console.log(`Using GitHub App token for ${cloneOwner}/${cloneRepo}`);
+    }
+
+    const git = simpleGit({ baseDir: tempDir });
+
+    console.log(`Cloning ${cloneOwner}/${cloneRepo}@${cloneRef} ...`);
+
+    await git.clone(repoUrl, tempDir, [
+      "--single-branch",
+      "--branch",
+      cloneRef,
+    ]);
+
+    console.log("Clone successful");
 
     const analysisResults = await runAnalysisTasks(tempDir);
 
+    const dbStatus =
+      analysisResults.status === "passed"
+        ? "completed"
+        : analysisResults.status;
+
     await pool.query(
       `INSERT INTO reports 
-       (repo_full_name, owner, repository_name, status, report_data, generated_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())`,
-      [repoFullName, owner, repositoryName, "completed", analysisResults],
+   (repo_full_name, owner, repository_name, status, report_data, generated_at)
+   VALUES ($1, $2, $3, $4, $5, NOW())`,
+      [repoFullName, owner, repositoryName, dbStatus, analysisResults],
     );
 
-    console.log(`Report saved successfully for ${repoFullName}`);
+    console.log(`✅ Report saved for ${repoFullName}`);
+
+    return analysisResults;
   } catch (error) {
-    console.error(`Error for ${repoFullName}:`, error);
-
-    await pool.query(
-      `INSERT INTO reports 
-       (repo_full_name, owner, repository_name, status, error_message, generated_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())
-       ON CONFLICT (repo_full_name) 
-       DO UPDATE SET status = $4, error_message = $5, updated_at = NOW()`,
-      [repoFullName, owner, repositoryName, "failed", error.message],
-    );
+    console.error(`❌ Error for ${repoFullName}:`, error.message);
+    throw error;
   } finally {
-    try {
-      await fs.rm(tempDir, { recursive: true, force: true });
-    } catch (e) {
-      console.error("Cleanup failed:", e);
-    }
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
 async function runAnalysisTasks(repoPath) {
-  const issues = [];
+  let issues = [];
+  const envPath = path.join(repoPath, ".env");
+  const hasEnvFile = await fileExists(envPath);
 
-  // 1. Check for exposed .env file
-  if (await fileExists(path.join(repoPath, ".env"))) {
-    issues.push({
-      id: "envExposed",
-      title: ".env file is committed to the repository",
-      severity: "high",
-      fix: "Remove .env from git (add it to .gitignore) and commit .env.example instead.",
-      location: ".env",
-    });
-  }
+  issues.push({
+    id: "envExposed",
+    title: ".env file is committed to the repository",
+    severity: hasEnvFile ? "high" : "low",
+    status: hasEnvFile ? "failed" : "passed",
+    fix: hasEnvFile
+      ? "Remove .env from git (add it to .gitignore) and commit .env.example instead."
+      : "Good! .env file is not committed.",
+    location: ".env",
+    description: hasEnvFile
+      ? "Exposed environment file can leak secrets."
+      : "No exposed .env file detected.",
+  });
 
-  // 2. Secret scanning patterns
   const secretPatterns = [
     {
       id: "openaiKey",
@@ -67,24 +98,19 @@ async function runAnalysisTasks(repoPath) {
       title: "OpenAI / Anthropic API Key",
     },
     {
-      id: "openaiLegacy",
-      regex: /sk-[a-zA-Z0-9]{32,}/i,
-      title: "Possible OpenAI-style Key",
-    },
-    {
       id: "awsAccessKey",
       regex: /AKIA[0-9A-Z]{16}/,
       title: "AWS Access Key ID",
     },
+    // {
+    //   id: "awsSecret",
+    //   regex: /(?i)aws(.{0,20})?['"][0-9a-zA-Z\/+]{40}['"]/,
+    //   title: "AWS Secret Access Key",
+    // },
     {
       id: "stripeLive",
       regex: /sk_live_[0-9a-zA-Z]{24}/,
       title: "Stripe Live Secret Key",
-    },
-    {
-      id: "stripeTest",
-      regex: /sk_test_[0-9a-zA-Z]{24}/,
-      title: "Stripe Test Secret Key",
     },
     {
       id: "githubToken",
@@ -106,15 +132,8 @@ async function runAnalysisTasks(repoPath) {
       regex: /xox[baprs]-[0-9a-zA-Z]{10,48}/,
       title: "Slack Token",
     },
-    {
-      id: "genericApiKey",
-      regex:
-        /(?:api|secret|key|token|auth)[\s_-]*(?:key|secret|token)?\s*[:=]\s*['"]?[A-Za-z0-9+\/=]{32,64}['"]?/i,
-      title: "Generic API Key / Secret",
-    },
   ];
 
-  // Improved ignore list - exclude lock files and heavy directories
   const ignoreDirs = new Set([
     "node_modules",
     ".git",
@@ -122,18 +141,12 @@ async function runAnalysisTasks(repoPath) {
     "build",
     ".next",
     "coverage",
-    ".vscode",
-    ".idea",
   ]);
-
   const ignoreFiles = new Set([
     "package-lock.json",
     "yarn.lock",
     "pnpm-lock.yaml",
     "bun.lockb",
-    "Cargo.lock",
-    "composer.lock",
-    "Gemfile.lock",
   ]);
 
   const allowedExtensions = new Set([
@@ -148,11 +161,7 @@ async function runAnalysisTasks(repoPath) {
     ".env",
     ".yml",
     ".yaml",
-    ".json",
     ".md",
-    ".toml",
-    ".ini",
-    ".cfg",
   ]);
 
   async function scanDirectory(dir) {
@@ -169,40 +178,30 @@ async function runAnalysisTasks(repoPath) {
         const fileName = entry.name.toLowerCase();
         const ext = path.extname(entry.name).toLowerCase();
 
-        // Skip lock files completely
-        if (ignoreFiles.has(fileName)) {
-          continue;
-        }
+        if (ignoreFiles.has(fileName)) continue;
 
-        // Only scan allowed file types
         if (allowedExtensions.has(ext) || fileName === ".env") {
           try {
             const content = await fs.readFile(fullPath, "utf8");
 
             for (const pattern of secretPatterns) {
-              const matches = content.match(pattern.regex);
-              if (matches) {
-                // Extra safety: skip very short matches in JSON files (common false positives)
-                if (ext === ".json" && matches[0].length < 50) {
-                  continue;
-                }
-
+              if (content.match(pattern.regex)) {
                 issues.push({
                   id: pattern.id,
                   title: `${pattern.title} detected`,
                   severity: "critical",
+                  status: "failed",
                   fix: "Remove the secret from the code and use environment variables instead.",
                   location: relativePath,
                   snippet:
-                    matches[0].length > 60
-                      ? matches[0].substring(0, 57) + "..."
-                      : matches[0],
+                    content.match(pattern.regex)[0].length > 60
+                      ? content.match(pattern.regex)[0].substring(0, 57) + "..."
+                      : content.match(pattern.regex)[0],
+                  description: `Hardcoded ${pattern.title} found in source code.`,
                 });
               }
             }
-          } catch (err) {
-            // Skip binary or unreadable files silently
-          }
+          } catch (err) {}
         }
       }
     }
@@ -210,12 +209,23 @@ async function runAnalysisTasks(repoPath) {
 
   await scanDirectory(repoPath);
 
+  const failedIssues = issues.filter((i) => i.status === "failed");
+  const passedIssues = issues.filter((i) => i.status === "passed");
+
+  const overallStatus = failedIssues.length > 0 ? "failed" : "passed";
+
+  const summary =
+    failedIssues.length > 0
+      ? `${failedIssues.length} security issue(s) found`
+      : "All security checks passed. Repository looks clean!";
+
   return {
+    status: overallStatus,
+    summary,
+    totalChecks: issues.length,
+    failedCount: failedIssues.length,
+    passedCount: passedIssues.length,
     issues,
-    summary: `${issues.length} potential security issues found`,
-    totalIssues: issues.length,
-    criticalCount: issues.filter((i) => i.severity === "critical").length,
-    highCount: issues.filter((i) => i.severity === "high").length,
     scannedAt: new Date().toISOString(),
   };
 }

@@ -27,7 +27,7 @@ async function getReportByRepo(repoFullName) {
 router.post("/generateReport", async (req, res) => {
   console.log("Received body:", req.body);
 
-  const { owner, repositoryName } = req.body || {};
+  const { owner, repositoryName, installationId } = req.body || {};
 
   if (!owner || !repositoryName) {
     return res.status(400).json({
@@ -44,7 +44,6 @@ router.post("/generateReport", async (req, res) => {
 
     if (existingReport) {
       console.log(`Report found for ${repoFullName}, returning existing data`);
-
       return res.status(200).json({
         success: true,
         message: "Report already exists",
@@ -53,7 +52,9 @@ router.post("/generateReport", async (req, res) => {
       });
     }
 
-    console.log(`No report found for ${repoFullName}. Starting generation...`);
+    console.log(
+      `No report found for ${repoFullName}. Starting background generation...`,
+    );
 
     res.status(202).json({
       success: true,
@@ -61,7 +62,11 @@ router.post("/generateReport", async (req, res) => {
       repoFullName,
     });
 
-    generateRepoReport(owner, repositoryName).catch((err) => {
+    generateRepoReport({
+      owner,
+      repositoryName,
+      installationId,
+    }).catch((err) => {
       console.error(`Background error for ${repoFullName}:`, err);
     });
   } catch (error) {
