@@ -164,6 +164,34 @@ async function runAnalysisTasks(repoPath) {
     ".md",
   ]);
 
+  const sqlInjectionPatterns = [
+    {
+      id: "sqlConcatenation",
+      regex:
+        /(?:mysql|pg|sqlite|knex|sequelize|prisma|typeorm|typeorm)\s*\.\s*(?:query|execute|raw|literal)\s*\(\s*["'`][^"'`]*\$\{|\+\s*[`'"].*?['"`]/i,
+      title: "Potential SQL Injection via string concatenation",
+      severity: "high",
+      description:
+        "User input is directly concatenated into SQL queries instead of using parameterized queries.",
+    },
+    {
+      id: "sqlTemplateLiteral",
+      regex: /[`'"](?:SELECT|INSERT|UPDATE|DELETE|WHERE|FROM).*?\$\{[^}]+\}/is,
+      title: "SQL Injection risk in template literals",
+      severity: "high",
+      description:
+        "Template literals with interpolated user-controlled values in SQL queries.",
+    },
+    {
+      id: "unsafeExec",
+      regex: /\.(?:exec|query)\s*\(\s*[`'"][^"'`]*\+\s*[^)]+/i,
+      title: "Unsafe database query execution",
+      severity: "critical",
+      description:
+        "Direct string concatenation detected in database query execution.",
+    },
+  ];
+
   async function scanDirectory(dir) {
     const entries = await fs.readdir(dir, { withFileTypes: true });
 
@@ -198,6 +226,20 @@ async function runAnalysisTasks(repoPath) {
                       ? content.match(pattern.regex)[0].substring(0, 57) + "..."
                       : content.match(pattern.regex)[0],
                   description: `Hardcoded ${pattern.title} found in source code.`,
+                });
+              }
+            }
+
+            for (const pattern of sqlInjectionPatterns) {
+              if (content.match(pattern.regex)) {
+                issues.push({
+                  id: pattern.id,
+                  title: pattern.title,
+                  severity: pattern.severity,
+                  status: "failed",
+                  fix: "Use parameterized queries, prepared statements, or an ORM with proper escaping (e.g., $1, ?, or named parameters). Never concatenate user input directly into SQL.",
+                  location: relativePath,
+                  description: pattern.description,
                 });
               }
             }
