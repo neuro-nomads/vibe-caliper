@@ -1,0 +1,6 @@
+### CHECK FOR SECRETS
+
+.env
+regex:
+
+### CHECK FOR SQL INJECTIONS
