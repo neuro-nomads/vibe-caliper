@@ -63,16 +63,29 @@ async function generateRepoReport(params) {
         ? "completed"
         : analysisResults.status;
 
-    await pool.query(
+    // FIXED: Use RETURNING * to get the full report including id
+    const insertResult = await pool.query(
       `INSERT INTO reports 
-   (repo_full_name, owner, repository_name, status, report_data, generated_at)
-   VALUES ($1, $2, $3, $4, $5, NOW())`,
+         (repo_full_name, owner, repository_name, status, report_data, generated_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
+       RETURNING id, repo_full_name, owner, repository_name, status, report_data, generated_at`,
       [repoFullName, owner, repositoryName, dbStatus, analysisResults],
     );
 
-    console.log(`✅ Report saved for ${repoFullName}`);
+    const savedReport = insertResult.rows[0];
 
-    return analysisResults;
+    console.log(`✅ Report saved for ${repoFullName} (ID: ${savedReport.id})`);
+
+    // Return BOTH: the full DB report (for webhook) + analysisResults (for frontend compatibility)
+    return {
+      ...analysisResults, // Keeps all your existing fields: status, summary, issues, etc.
+      id: savedReport.id, // ← This is what webhook needs
+      repo_full_name: savedReport.repo_full_name,
+      owner: savedReport.owner,
+      repository_name: savedReport.repository_name,
+      status: savedReport.status, // DB status
+      generated_at: savedReport.generated_at,
+    };
   } catch (error) {
     console.error(`❌ Error for ${repoFullName}:`, error.message);
     throw error;
